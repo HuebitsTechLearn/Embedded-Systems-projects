@@ -1,0 +1,119 @@
+// ============================================================================================
+// Automated Plant Irrigation System - Arduino Code
+// ============================================================================================
+// This code builds an automated plant irrigation system using an Arduino Uno.
+// It continuously monitors soil moisture levels using a capacitive soil moisture sensor.
+// When the soil moisture drops below a predefined dry threshold, it activates a water pump
+// via a relay module to irrigate the plant until a wet threshold is reached.
+//
+// Author: Gemini
+// Date: June 14, 2025
+//
+// Libraries Required:
+//   - No special libraries are required for this basic setup (using analogRead, digitalRead/Write).
+//
+// Wiring Guide (Arduino Uno):
+// ----------------------------
+// Capacitive Soil Moisture Sensor:
+//   - VCC to 5V
+//   - GND to GND
+//   - Analog Output (A0) to Arduino Analog Pin A0
+//
+// Relay Module (e.g., 1-channel):
+//   - VCC to 5V (or external 5V, depending on relay module)
+//   - GND to GND
+//   - IN (Input) to Arduino Digital Pin 7 (PUMP_RELAY_PIN)
+//     (Note: Many relay modules are 'active LOW', meaning they activate when the IN pin is LOW)
+//
+// DC Water Pump:
+//   - Connect the pump to the NO (Normally Open) and COM (Common) terminals of the relay.
+//   - Connect an external power supply (e.g., 5V or 12V, matching your pump's voltage)
+//     to the pump, with the relay acting as a switch in series with the pump's positive line.
+//     Alternatively, if using a very small 5V pump that draws minimal current, you *might*
+//     be able to power it directly from Arduino's 5V through the relay, but an external
+//     power supply for the pump is always recommended for reliability and to protect Arduino.
+//
+// LED Indicator (Optional):
+//   - Green LED (Pump ON indicator) to Arduino Digital Pin 8 (PUMP_STATUS_LED)
+//     with a 220 Ohm current-limiting resistor from LED's anode to pin 8. Cathode to GND.
+//
+// Important:
+// - Calibrate the SOIL_MOISTURE_DRY_THRESHOLD and SOIL_MOISTURE_WET_THRESHOLD
+//   values based on your sensor and soil type.
+// - Ensure the relay's IN pin logic (active HIGH or LOW) matches your wiring and code.
+//   This code assumes an active-LOW relay (LOW = ON, HIGH = OFF).
+// - Always use a separate power supply for the water pump if it draws significant current.
+// ============================================================================================
+
+// ======================= Pin Definitions =======================
+#define SOIL_MOISTURE_SENSOR_PIN A0   // Analog pin connected to soil moisture sensor output
+#define PUMP_RELAY_PIN 7              // Digital pin connected to relay module's IN pin
+#define PUMP_STATUS_LED 8             // Digital pin for LED indicating pump status (optional)
+
+// ======================= Irrigation Thresholds (CALIBRATE THESE!) =======================
+// These values depend on your specific soil moisture sensor and soil type.
+// - To calibrate: Read sensor values when soil is bone dry, then fully saturated.
+// - Example range: 0 (very wet) to 1023 (very dry) for analog sensors.
+//   Adjust these thresholds based on your observations.
+const int SOIL_MOISTURE_DRY_THRESHOLD = 600; // If moisture reading is ABOVE this, soil is considered DRY
+const int SOIL_MOISTURE_WET_THRESHOLD = 300; // If moisture reading is BELOW this, soil is considered WET (stop pumping)
+
+// ======================= Irrigation Parameters =======================
+// This approach waits until soil is wet. Alternative: pump for a fixed time.
+// const unsigned long PUMP_RUN_DURATION = 10000; // 10 seconds (if using fixed time pumping)
+
+// ======================= Global Variables =======================
+bool isPumpOn = false; // Tracks the current state of the pump
+unsigned long lastReadTime = 0;
+const long READ_INTERVAL = 5000; // Read sensor every 5 seconds
+
+// ======================= Setup Function =======================
+void setup() {
+  Serial.begin(9600); // Initialize serial communication for debugging
+  Serial.println("Automated Plant Irrigation System - Starting Up...");
+
+  // Set pin modes
+  pinMode(PUMP_RELAY_PIN, OUTPUT);
+  pinMode(PUMP_STATUS_LED, OUTPUT);
+
+  // Ensure pump is off initially (assuming active-LOW relay, so HIGH means OFF)
+  digitalWrite(PUMP_RELAY_PIN, HIGH);
+  digitalWrite(PUMP_STATUS_LED, LOW); // Turn off status LED
+
+  Serial.println("System Initialized. Monitoring soil moisture...");
+}
+
+// ======================= Loop Function =======================
+void loop() {
+  // Read sensor data periodically
+  if (millis() - lastReadTime >= READ_INTERVAL) {
+    int soilMoistureValue = analogRead(SOIL_MOISTURE_SENSOR_PIN);
+
+    Serial.print("Soil Moisture Value: ");
+    Serial.println(soilMoistureValue);
+
+    // Decision logic for irrigation
+    if (soilMoistureValue > SOIL_MOISTURE_DRY_THRESHOLD) {
+      // Soil is dry, turn on the pump
+      if (!isPumpOn) {
+        Serial.println("Soil is DRY. Activating pump.");
+        digitalWrite(PUMP_RELAY_PIN, LOW); // Turn pump ON (active-LOW relay)
+        digitalWrite(PUMP_STATUS_LED, HIGH); // Turn on LED
+        isPumpOn = true;
+      }
+    } else if (soilMoistureValue < SOIL_MOISTURE_WET_THRESHOLD) {
+      // Soil is wet enough, turn off the pump
+      if (isPumpOn) {
+        Serial.println("Soil is WET enough. Deactivating pump.");
+        digitalWrite(PUMP_RELAY_PIN, HIGH); // Turn pump OFF (active-LOW relay)
+        digitalWrite(PUMP_STATUS_LED, LOW); // Turn off LED
+        isPumpOn = false;
+      }
+    }
+
+    lastReadTime = millis(); // Update last read time
+  }
+
+  // No blocking delays in the loop besides the read interval,
+  // allowing other potential tasks to run.
+}
