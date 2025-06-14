@@ -1,0 +1,168 @@
+// ============================================================================================
+// Voice-Controlled Robot Using Arduino & Bluetooth
+// ============================================================================================
+// This code controls a 4-wheel robot using voice commands received via Bluetooth from an
+// Android smartphone. It uses an Arduino Uno, an HC-05 Bluetooth module, and an L298N motor driver.
+//
+// Author: Gemini
+// Date: June 14, 2025
+//
+// Libraries Required:
+//   1. SoftwareSerial.h (built-in for Arduino IDE) - For HC-05 Bluetooth communication.
+//
+// Wiring Guide (Arduino Uno):
+// ----------------------------
+// HC-05 Bluetooth Module:
+//   - VCC to 5V
+//   - GND to GND
+//   - RXD (HC-05) to Arduino Digital Pin 11 (SoftwareSerial TX)
+//   - TXD (HC-05) to Arduino Digital Pin 10 (SoftwareSerial RX)
+//     (NOTE: For HC-05, if your Arduino is 5V and HC-05 is 3.3V, you MIGHT need a voltage
+//     divider on the Arduino's TX pin going to HC-05's RX pin to protect the HC-05.
+//     Many HC-05 modules have onboard voltage regulators and are tolerant, but check datasheet.)
+//
+// L298N Motor Driver Module:
+//   - ENA (Enable Motor 1) to Arduino Digital Pin 9 (PWM pin for speed control)
+//   - IN1 (Motor 1 Forward) to Arduino Digital Pin 7
+//   - IN2 (Motor 1 Backward) to Arduino Digital Pin 6
+//   - IN3 (Motor 2 Forward) to Arduino Digital Pin 5
+//   - IN4 (Motor 2 Backward) to Arduino Digital Pin 4
+//   - ENB (Enable Motor 2) to Arduino Digital Pin 3 (PWM pin for speed control)
+//   - VCC (+12V) to external battery for motors (e.g., 4xAA or LiPo)
+//   - GND (L298N) to GND (external battery) AND Arduino GND (common ground)
+//   - OUT1 & OUT2 to Motor 1
+//   - OUT3 & OUT4 to Motor 2
+//
+// DC Gear Motors (2 or 4):
+//   - Connect to OUT1/OUT2 and OUT3/OUT4 of L298N.
+//     For a 4-wheel drive, connect front and rear motors on each side in parallel to the same L298N outputs.
+//
+// Important:
+// - Ensure a common ground between Arduino, L298N, and the motor battery.
+// - Provide a separate power supply for the motors via the L298N. Do NOT power motors directly from Arduino's 5V.
+// - Use a Bluetooth terminal app on your Android phone that supports voice input and sending strings.
+// ============================================================================================
+
+#include <SoftwareSerial.h> // For Bluetooth communication
+
+// ======================= Bluetooth Module Settings =======================
+#define BLUETOOTH_RX_PIN 10 // Connect to HC-05 TXD
+#define BLUETOOTH_TX_PIN 11 // Connect to HC-05 RXD
+SoftwareSerial bluetooth(BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN);
+
+// ======================= Motor Driver Pins (L298N) =======================
+// Motor A (Right Side)
+#define ENA 9  // Enable/PWM pin for Motor A
+#define IN1 7  // Motor A Input 1
+#define IN2 6  // Motor A Input 2
+
+// Motor B (Left Side)
+#define ENB 3  // Enable/PWM pin for Motor B
+#define IN3 5  // Motor B Input 3
+#define IN4 4  // Motor B Input 4
+
+// Motor Speed (PWM value, 0-255)
+const int motorSpeed = 150; // Adjust as needed, 0 (stop) to 255 (max speed)
+
+// ======================= Setup Function =======================
+void setup() {
+  Serial.begin(9600); // Initialize serial communication for debugging
+  Serial.println("Voice-Controlled Robot - Starting Up...");
+
+  // Initialize Bluetooth serial communication
+  bluetooth.begin(9600); // HC-05 default baud rate is usually 9600 or 38400
+  Serial.println("Bluetooth Serial initialized. Waiting for commands...");
+
+  // Set motor control pins as OUTPUTs
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  // Initially stop all motors
+  stopMotors();
+}
+
+// ======================= Motor Control Functions =======================
+
+void stopMotors() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENA, 0); // Set speed to 0
+  analogWrite(ENB, 0); // Set speed to 0
+  Serial.println("Motors STOPPED.");
+}
+
+void moveForward() {
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+  digitalWrite(IN1, HIGH); // Motor A forward
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); // Motor B forward
+  digitalWrite(IN4, LOW);
+  Serial.println("Moving FORWARD.");
+}
+
+void moveBackward() {
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+  digitalWrite(IN1, LOW); // Motor A backward
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW); // Motor B backward
+  digitalWrite(IN4, HIGH);
+  Serial.println("Moving BACKWARD.");
+}
+
+void turnLeft() {
+  analogWrite(ENA, motorSpeed); // Right motor forward
+  analogWrite(ENB, motorSpeed); // Left motor backward (or reduced speed)
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+  Serial.println("Turning LEFT.");
+}
+
+void turnRight() {
+  analogWrite(ENA, motorSpeed); // Right motor backward (or reduced speed)
+  analogWrite(ENB, motorSpeed); // Left motor forward
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+  Serial.println("Turning RIGHT.");
+}
+
+// ======================= Main Loop Function =======================
+void loop() {
+  // Read incoming data from Bluetooth
+  if (bluetooth.available()) {
+    String command = bluetooth.readStringUntil('\n'); // Read until newline character
+    command.trim(); // Remove leading/trailing whitespace
+    command.toUpperCase(); // Convert command to uppercase for easier comparison
+
+    Serial.print("Received Command: '");
+    Serial.print(command);
+    Serial.println("'");
+
+    // Process commands
+    if (command == "FORWARD") {
+      moveForward();
+    } else if (command == "BACKWARD") {
+      moveBackward();
+    } else if (command == "LEFT") {
+      turnLeft();
+    } else if (command == "RIGHT") {
+      turnRight();
+    } else if (command == "STOP") {
+      stopMotors();
+    } else {
+      Serial.println("Unknown command.");
+    }
+  }
+  delay(10); // Small delay to prevent issues
+}
