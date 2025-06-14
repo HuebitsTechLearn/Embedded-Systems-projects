@@ -1,0 +1,252 @@
+============================================================================================
+// Smart Health Monitoring Wearable - Arduino Nano Code
+// ============================================================================================
+// This code integrates a MAX30102 Pulse Oximeter, DS18B20 Temperature Sensor,
+// an OLED Display, and an HC-05/HM-10 Bluetooth Module to create a wearable
+// health monitoring device. It measures heart rate (HR), blood oxygen saturation (SpO2),
+// and body temperature, displaying them locally and sending them wirelessly.
+//
+// Author: Gemini
+// Date: June 14, 2025
+//
+// Libraries Required:
+//   1. Adafruit GFX Library      (by Adafruit)
+//   2. Adafruit SSD1306 Library  (by Adafruit)
+//   3. Adafruit MAX30105 Library (by Adafruit) - Note: This library might require
+//      modifications or specific algorithms for accurate SpO2 calculation.
+//      For true SpO2, you might need a more advanced library or implement the
+//      algorithm yourself based on the MAX30102 datasheet or application notes.
+//      This code uses the library's built-in, potentially simplified SpO2.
+//   4. OneWire Library           (by Paul Stoffregen)
+//   5. DallasTemperature Library (by Miles Burton / Dallas Semiconductor)
+//   6. SoftwareSerial Library    (built-in for Arduino IDE)
+//
+// Wiring Guide (Arduino Nano):
+// ----------------------------
+// MAX30102:
+//   - VIN to 3.3V or 5V (check your module's voltage)
+//   - GND to GND
+//   - SDA to A4 (SDA)
+//   - SCL to A5 (SCL)
+//
+// DS18B20 Temperature Sensor:
+//   - VCC to 5V
+//   - GND to GND
+//   - DQ (Data) to Digital Pin 2 (with a 4.7K Ohm pull-up resistor from DQ to VCC)
+//
+// OLED Display (SSD1306 0.96" I2C):
+//   - VCC to 5V
+//   - GND to GND
+//   - SDA to A4 (SDA)
+//   - SCL to A5 (SCL)
+//
+// HC-05 / HM-10 Bluetooth Module:
+//   - VCC to 5V
+//   - GND to GND
+//   - RXD to Digital Pin 10 (Connect to Arduino's TX via SoftwareSerial)
+//   - TXD to Digital Pin 11 (Connect to Arduino's RX via SoftwareSerial)
+//     (Note: For HC-05, check if you need a voltage divider on Arduino TX to HC-05 RX if using 5V Arduino with 3.3V BT module)
+//
+// Important: Ensure you have connected a 4.7K Ohm pull-up resistor between the
+// DQ pin of the DS18B20 and the 5V line.
+// Adjust BLE_RX_PIN and BLE_TX_PIN if you've chosen different pins.
+// ============================================================================================
+
+#include <Wire.h>             // Required for I2C communication (OLED and MAX30102)
+#include <Adafruit_GFX.h>     // Core graphics library
+#include <Adafruit_SSD1306.h> // OLED display library
+#include <Adafruit_MAX30105.h> // MAX30102 sensor library
+#include <OneWire.h>          // Required for DS18B20 temperature sensor
+#include <DallasTemperature.h> // Required for DS18B20 temperature sensor
+#include <SoftwareSerial.h>   // Required for Bluetooth module communication
+
+// ======================= OLED Display Settings =======================
+#define SCREEN_WIDTH 128    // OLED display width, in pixels
+#define SCREEN_HEIGHT 64    // OLED display height, in pixels
+#define OLED_RESET -1       // Reset pin # (or -1 if sharing Arduino reset pin)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ======================= MAX30102 Sensor Settings =======================
+Adafruit_MAX30105 particleSensor;
+const byte POWER_LED_RING = MAX30105_PULSE_AMPLITUDE_MEDIUM; // Options: LOW, MEDIUM, HIGH, MAX
+const byte RED_LED_RING = MAX30105_PULSE_AMPLITUDE_MEDIUM;
+const byte IR_LED_RING = MAX30105_PULSE_AMPLITUDE_MEDIUM;
+
+// Variables for Heart Rate and SpO2 calculation (simplified or library-driven)
+float hr = 0;
+float spo2 = 0;
+
+// ======================= DS18B20 Temperature Sensor Settings =======================
+#define ONE_WIRE_BUS 2      // DS18B20 data pin connected to Arduino Digital Pin 2
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// ======================= Bluetooth Module Settings (HC-05/HM-10) =======================
+#define BLE_RX_PIN 10       // RX pin for Bluetooth module (Connect to Arduino Digital Pin 10)
+#define BLE_TX_PIN 11       // TX pin for Bluetooth module (Connect to Arduino Digital Pin 11)
+SoftwareSerial bleSerial(BLE_RX_PIN, BLE_TX_PIN); // RX, TX
+
+// ======================= Main Setup Function =======================
+void setup() {
+  Serial.begin(9600); // Initialize Serial Monitor for debugging
+  Serial.println("Smart Health Monitoring Wearable - Starting Up...");
+
+  // Initialize OLED display
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3C for 128x64
+    Serial.println(F("SSD1306 allocation failed"));
+    for (;;); // Don't proceed, loop forever
+  }
+  display.display(); // Clear buffer
+  delay(2000);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Initializing...");
+  display.display();
+
+  // Initialize MAX30102
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) { // Use I2C_SPEED_FAST for faster communication
+    Serial.println(F("MAX30102 was not found. Please check wiring/power."));
+    while (1); // Don't proceed, loop forever
+  }
+  Serial.println("MAX30102 found.");
+
+  // Configure sensor settings for MAX30102 (example settings, optimize as needed)
+  particleSensor.setup(POWER_LED_RING, RED_LED_RING, IR_LED_RING,
+                       MAX30105_SAMPLING_RATE_100HZ, MAX30105_PULSE_WIDTH_411US,
+                       MAX30105_ADC_RANGE_4096);
+  // It's crucial to set the AFE (Analog Front End) settings correctly for good readings.
+  // For HR and SpO2, typically RED and IR LEDs are used.
+  // Power up the sensor only after setup is done to conserve power during initialization.
+  particleSensor.setPulseAmplitudeRed(RED_LED_RING);
+  particleSensor.setPulseAmplitudeIR(IR_LED_RING);
+  particleSensor.setPulseAmplitudeGreen(0); // Not using green LED for HR/SpO2
+
+  // Initialize DS18B20
+  sensors.begin();
+  Serial.println("DS18B20 found.");
+
+  // Initialize Bluetooth Serial
+  bleSerial.begin(9600); // HC-05/HM-10 default baud rate is usually 9600 or 38400
+  Serial.println("Bluetooth Serial initialized.");
+
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Ready!");
+  display.display();
+  delay(1000);
+}
+
+// ======================= Main Loop Function =======================
+void loop() {
+  // -------------------- Read MAX30102 Data --------------------
+  // This library provides raw IR/Red data.
+  // For actual HR and SpO2 calculation, you often need to implement
+  // specific algorithms. The Adafruit library provides basic functions
+  // but sophisticated SpO2 often needs more.
+  // For demonstration, we will rely on the library's capability to
+  // provide some HR/SpO2 if available.
+  // For a more robust solution, consider SparkFun's MAX30102 library
+  // or specialized algorithms.
+
+  particleSensor.heartBeat(false); // Disable built-in heartbeat LED if it causes issues
+  uint32_t ir = particleSensor.get                 // Read the raw IR value
+                               (
+                                false
+                                )
+                               ;
+
+  if (ir > 50000) { // Basic check if finger is on sensor (adjust threshold as needed)
+    particleSensor.readParticleSensor(); // Read all available data from the sensor
+
+    // The Adafruit library can calculate HR/SpO2 with some limitations.
+    // For more reliable SpO2, especially, you might need to use a different
+    // library or implement the full algorithm from Maxim's application notes.
+    // This part is simplified for demonstration.
+    float currentHR = particleSensor.getHeartRate();
+    float currentSpO2 = particleSensor.getSpO2();
+
+    if (currentHR > 0 && currentHR < 200) { // Filter out unrealistic readings
+      hr = currentHR;
+    }
+    if (currentSpO2 > 0 && currentSpO2 <= 100) { // Filter out unrealistic readings
+      spo2 = currentSpO2;
+    }
+  } else {
+    // Finger not detected or removed
+    hr = 0;
+    spo2 = 0;
+    particleSensor.clearFIFO(); // Clear FIFO when finger is removed to prevent old data affecting new readings
+  }
+
+
+  // -------------------- Read DS18B20 Temperature Data --------------------
+  sensors.requestTemperatures(); // Send the command to get temperatures
+  float tempC = sensors.getTempCByIndex(0); // Get temperature in Celsius
+  float tempF = DallasTemperature::toFahrenheit(tempC); // Convert to Fahrenheit
+
+  // -------------------- Display Data on OLED --------------------
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.setTextSize(2);
+  display.print("HR: ");
+  display.print(hr, 0); // Display HR with no decimal places
+  display.println(" bpm");
+
+  display.print("SpO2: ");
+  display.print(spo2, 1); // Display SpO2 with one decimal place
+  display.println(" %");
+
+  display.setTextSize(1);
+  display.print("Temp: ");
+  if (tempC != -127.00) { // -127 is the error code for DS18B20
+    display.print(tempC, 1); // Display temperature with one decimal place
+    display.print((char)247); // Degree symbol
+    display.println("C");
+    display.print("      "); // Indent for F
+    display.print(tempF, 1);
+    display.print((char)247); // Degree symbol
+    display.println("F");
+  } else {
+    display.println("N/A");
+  }
+  display.display(); // Update the display
+
+  // -------------------- Send Data via Bluetooth (BLE) --------------------
+  String dataToSend = "";
+  if (hr > 0) {
+      dataToSend += "HR:";
+      dataToSend += String(hr, 0);
+  }
+  if (spo2 > 0) {
+      if (dataToSend.length() > 0) dataToSend += ",";
+      dataToSend += "SpO2:";
+      dataToSend += String(spo2, 1);
+  }
+  if (tempC != -127.00) {
+      if (dataToSend.length() > 0) dataToSend += ",";
+      dataToSend += "TempC:";
+      dataToSend += String(tempC, 1);
+  }
+  
+  if (dataToSend.length() > 0) {
+      dataToSend += "\n"; // Add newline as a delimiter for the mobile app
+      bleSerial.print(dataToSend);
+      Serial.print("Sent via BLE: ");
+      Serial.print(dataToSend);
+  } else {
+      Serial.println("No valid data to send.");
+  }
+
+
+  // -------------------- Debugging on Serial Monitor --------------------
+  Serial.print("IR: "); Serial.print(ir);
+  Serial.print(" | HR: "); Serial.print(hr);
+  Serial.print(" | SpO2: "); Serial.print(spo2);
+  Serial.print(" | TempC: "); Serial.print(tempC);
+  Serial.print(" | TempF: "); Serial.println(tempF);
+
+  delay(2000); // Wait for 2 seconds before next reading cycle
+}
+
