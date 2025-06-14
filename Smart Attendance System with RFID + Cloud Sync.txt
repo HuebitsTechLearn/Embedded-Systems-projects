@@ -1,0 +1,216 @@
+// ============================================================================================
+// Smart Attendance System with RFID + Cloud Sync
+// ============================================================================================
+// This code creates an automated attendance system using an ESP8266 (NodeMCU).
+// It reads RFID tags using an RC522 module and uploads attendance records
+// (RFID UID and timestamp) to Google Firebase Realtime Database.
+//
+// Author: Gemini
+// Date: June 14, 2025
+//
+// Libraries Required:
+//   1. ESP8266WiFi.h (built-in for ESP8266 boards)
+//   2. Firebase ESP Client (by Mobizt) - Install via Library Manager (search for 'Firebase ESP Client')
+//   3. SPI.h (built-in for SPI communication)
+//   4. MFRC522.h (by Udo Klein, but ensure it's compatible with ESP8266 SPI, or use SparkFun's fork)
+//      - Look for 'MFRC522' in Library Manager. The default one usually works.
+//
+// Wiring Guide (NodeMCU ESP8266):
+// ----------------------------
+// RC522 RFID Module (SPI Communication):
+//   - SDA (SS) to ESP8266 D4 (GPIO2) - Can be changed, ensure it's a GPIO pin
+//   - SCK to ESP8266 D5 (GPIO14)
+//   - MOSI to ESP8266 D7 (GPIO13)
+//   - MISO to ESP8266 D6 (GPIO12)
+//   - IRQ to UNCONNECTED (not used in this basic example)
+//   - GND to GND
+//   - RST to ESP8266 D3 (GPIO0)
+//   - VCC to 3.3V (important! RC522 is a 3.3V device)
+//
+// LED Indicators (Optional but Recommended):
+//   - Green LED (Success) to ESP8266 D1 (GPIO5) with a current-limiting resistor
+//   - Red LED (Failure/Error) to ESP8266 D2 (GPIO4) with a current-limiting resistor
+//   - Buzzer to ESP8266 D0 (GPIO16) with a current-limiting resistor
+//
+// Important:
+// - Replace 'YOUR_SSID', 'YOUR_PASSWORD', 'FIREBASE_HOST', and 'FIREBASE_AUTH_KEY'
+//   with your actual credentials.
+// - Ensure your Firebase Realtime Database rules allow write access for this project.
+//   For testing, you might temporarily set rules to:
+//   {
+//     "rules": {
+//       ".read": "auth != null",
+//       ".write": "auth != null"
+//     }
+//   }
+//   For a simple anonymous setup (which this code uses), it might be:
+//   {
+//     "rules": {
+//       ".read": true,
+//       ".write": true
+//     }
+//   }
+//   However, for production, implement proper authentication.
+//   This example uses Firebase's anonymous sign-in implicitly if no auth key is used.
+// ============================================================================================
+
+#include <ESP8266WiFi.h>
+#include <FirebaseESP8266.h> // For Firebase Realtime Database
+#include <SPI.h>           // For SPI communication with RC522
+#include <MFRC522.h>       // For RC522 RFID reader
+
+// ======================= Wi-Fi & Firebase Configuration =======================
+#define WIFI_SSID "YOUR_SSID"          // Your Wi-Fi SSID
+#define WIFI_PASSWORD "YOUR_PASSWORD"  // Your Wi-Fi Password
+
+#define FIREBASE_HOST "YOUR_PROJECT_ID.firebaseio.com" // Replace with your Firebase project ID (e.g., my-project-12345.firebaseio.com)
+#define FIREBASE_AUTH "YOUR_FIREBASE_WEB_API_KEY"      // Replace with your Firebase Web API Key (from Project settings -> General -> Web API Key)
+                                                       // For simplicity, you can leave it empty if Firebase rules allow unauthenticated write,
+                                                       // but it's not recommended for production.
+
+// Define Firebase Data objects
+FirebaseData firebaseData;
+FirebaseAuth firebaseAuth;
+FirebaseConfig firebaseConfig;
+
+// ======================= RC522 RFID Reader Pin Configuration =======================
+#define SS_PIN D4   // Configurable: SDA pin for RC522 (connect to ESP8266 D4 / GPIO2)
+#define RST_PIN D3  // Configurable: RST pin for RC522 (connect to ESP8266 D3 / GPIO0)
+
+MFRC522 mfrc522(SS_PIN, RST_PIN); // Create MFRC522 instance
+
+// ======================= LED & Buzzer Pins (Optional) =======================
+#define GREEN_LED_PIN D1 // GPIO5
+#define RED_LED_PIN D2   // GPIO4
+#define BUZZER_PIN D0    // GPIO16
+
+// ======================= Global Variables =======================
+String lastScannedUID = "";
+unsigned long lastScanTime = 0;
+const long SCAN_DEBOUNCE_TIME = 3000; // 3 seconds debounce time to prevent multiple reads
+
+// ======================= Helper Function: UID to String =======================
+String uidToString(byte *buffer, byte bufferSize) {
+  String uidString = "";
+  for (byte i = 0; i < bufferSize; i++) {
+    uidString += (buffer[i] < 0x10 ? "0" : "");
+    uidString += String(buffer[i], HEX);
+  }
+  return uidString;
+}
+
+// ======================= Setup Function =======================
+void setup() {
+  Serial.begin(115200); // Start serial communication for debugging
+
+  // Initialize LED & Buzzer pins
+  pinMode(GREEN_LED_PIN, OUTPUT);
+  pinMode(RED_LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(GREEN_LED_PIN, LOW); // Ensure LEDs are off initially
+  digitalWrite(RED_LED_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  // Connect to Wi-Fi
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  unsigned long startTime = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+    if (millis() - startTime > 15000) { // Timeout after 15 seconds
+      Serial.println("\nFailed to connect to WiFi. Please check credentials and try again.");
+      ESP.restart(); // Restart ESP8266 to retry connection
+    }
+  }
+  Serial.println("\nWiFi connected.");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  // Initialize Firebase
+  firebaseConfig.host = FIREBASE_HOST;
+  firebaseConfig.signer.tokens.legacy_token = FIREBASE_AUTH; // Use legacy token for Firebase Realtime Database
+
+  Firebase.begin(&firebaseConfig, &firebaseAuth);
+  Firebase.reconnectWiFi(true); // Reconnect Wi-Fi automatically if disconnected
+
+  // Optional: Sign in anonymously (if Firebase rules allow unauthenticated write, this step might be less critical but good practice)
+  // if (Firebase.signUp(&firebaseConfig, &firebaseAuth, "", "") == false) {
+  //   Serial.printf("Sign up failed, %s\n", firebaseConfig.signer.error.message.c_str());
+  // }
+  // else {
+  //   Serial.println("Signed in anonymously to Firebase.");
+  // }
+
+  // Initialize RC522
+  SPI.begin();       // Init SPI bus
+  mfrc522.PCD_Init(); // Init MFRC522
+  Serial.println("RC522 initialized. Ready to scan RFID cards.");
+  Serial.println("Place an RFID card on the reader...");
+}
+
+// ======================= Loop Function =======================
+void loop() {
+  // Look for new cards
+  if (!mfrc522.PICC_IsNewCardPresent()) {
+    return; // No new card present
+  }
+
+  // Select one of the cards
+  if (!mfrc522.PICC_ReadCardSerial()) {
+    return; // Couldn't read the serial of the card
+  }
+
+  String currentUID = uidToString(mfrc522.uid.uidByte, mfrc522.uid.size);
+
+  // Debounce check: Only process if it's a new card or enough time has passed
+  if (currentUID == lastScannedUID && (millis() - lastScanTime < SCAN_DEBOUNCE_TIME)) {
+    Serial.println("Same card scanned too quickly. Debouncing...");
+    digitalWrite(RED_LED_PIN, HIGH); delay(100); digitalWrite(RED_LED_PIN, LOW); // Quick red flash
+    return;
+  }
+
+  lastScannedUID = currentUID;
+  lastScanTime = millis();
+
+  Serial.print("Card UID: ");
+  Serial.println(currentUID);
+
+  // ======================= Firebase Data Handling =======================
+  // Path for attendance: /attendance_records/<UID>/<timestamp_epoch_ms>/
+  // Each entry will store a simple timestamp or more details if needed.
+  String attendancePath = "/attendance_records/" + currentUID;
+  String timestampPath = attendancePath + "/" + String(Firebase.getCurrentTimestamp()); // Use Firebase's server timestamp
+
+  // You can store a simple boolean, a string, or a JSON object.
+  // For this example, we'll store a JSON object with 'status' and 'device_id'.
+  FirebaseJson json;
+  json.set("status", "present");
+  json.set("device_id", WiFi.macAddress()); // Optionally record the MAC address of the ESP32
+
+  Serial.print("Attempting to send data to Firebase at: ");
+  Serial.println(timestampPath);
+
+  if (Firebase.set(firebaseData, timestampPath.c_str(), json)) {
+    Serial.println("Attendance marked successfully on Firebase!");
+    digitalWrite(GREEN_LED_PIN, HIGH); // Green LED for success
+    tone(BUZZER_PIN, 1000, 200); // Beep for success
+    delay(500);
+    digitalWrite(GREEN_LED_PIN, LOW);
+  } else {
+    Serial.print("Failed to mark attendance: ");
+    Serial.println(firebaseData.errorReason());
+    digitalWrite(RED_LED_PIN, HIGH); // Red LED for failure
+    tone(BUZZER_PIN, 500, 500); // Buzz for failure
+    delay(1000);
+    digitalWrite(RED_LED_PIN, LOW);
+  }
+
+  // Halt PICC (Proximal Inductive Coupling Card)
+  mfrc522.PICC_HaltA();
+  // Stop encryption on PICC
+  mfrc522.PCD_StopCrypto1();
+
+  delay(100); // Small delay to allow the system to settle
+}
