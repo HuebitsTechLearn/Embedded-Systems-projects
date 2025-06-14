@@ -1,0 +1,188 @@
+// ============================================================================================
+// Real-Time Object Avoiding Car (Ultrasonic + L298N)
+// ============================================================================================
+// This code controls an autonomous car that avoids obstacles using an ultrasonic sensor.
+// It continuously measures distance to objects and adjusts the car's movement (forward, turn, reverse)
+// to prevent collisions.
+//
+// Author: Gemini
+// Date: June 14, 2025
+//
+// Libraries Required:
+//   - No special libraries are required for this basic setup.
+//
+// Wiring Guide (Arduino Uno):
+// ----------------------------
+// HC-SR04 Ultrasonic Sensor:
+//   - VCC to 5V
+//   - GND to GND
+//   - Trig Pin to Arduino Digital Pin 8
+//   - Echo Pin to Arduino Digital Pin 9
+//
+// L298N Motor Driver Module:
+//   - ENA (Enable Motor 1) to Arduino Digital Pin 11 (PWM pin for speed control)
+//   - IN1 (Motor 1 Forward) to Arduino Digital Pin 10
+//   - IN2 (Motor 1 Backward) to Arduino Digital Pin 9
+//   - IN3 (Motor 2 Forward) to Arduino Digital Pin 7
+//   - IN4 (Motor 2 Backward) to Arduino Digital Pin 6
+//   - ENB (Enable Motor 2) to Arduino Digital Pin 5 (PWM pin for speed control)
+//   - VCC (+12V) to external battery for motors (e.g., 4xAA or LiPo)
+//   - GND (L298N) to GND (external battery) AND Arduino GND (common ground)
+//   - OUT1 & OUT2 to Motor 1
+//   - OUT3 & OUT4 to Motor 2
+//
+// DC Gear Motors (2 or 4):
+//   - Connect to OUT1/OUT2 and OUT3/OUT4 of L298N.
+//     For a 4-wheel drive, connect front and rear motors on each side in parallel to the same L298N outputs.
+//
+// Important:
+// - Ensure a common ground between Arduino, L298N, ultrasonic sensor, and the motor battery.
+// - Provide a separate power supply for the motors via the L298N. Do NOT power motors directly from Arduino's 5V.
+// - Adjust OBSTACLE_DISTANCE_THRESHOLD_CM and motorSpeed as needed for your robot's size and environment.
+// ============================================================================================
+
+// ======================= Ultrasonic Sensor Pins =======================
+#define ULTRASONIC_TRIG_PIN 8
+#define ULTRASONIC_ECHO_PIN 9
+
+// ======================= Motor Driver Pins (L298N) =======================
+// Note: Changed IN2 and ENB pins to avoid conflict with ULTRASONIC_ECHO_PIN if using PWM on 9.
+// If using different Arduino pins for L298N:
+// Motor A (Right Side)
+#define ENA 11 // Enable/PWM pin for Motor A (Right)
+#define IN1 10 // Motor A Input 1 (Right Forward)
+#define IN2 12 // Motor A Input 2 (Right Backward) - Changed from 9 to 12
+
+// Motor B (Left Side)
+#define ENB 5  // Enable/PWM pin for Motor B (Left) - Changed from 3 to 5 (assuming 3 is used for other purpose or just for better PWM distribution)
+#define IN3 7  // Motor B Input 1 (Left Forward)
+#define IN4 6  // Motor B Input 2 (Left Backward)
+
+// Motor Speed (PWM value, 0-255)
+const int motorSpeed = 180; // Adjust as needed, 0 (stop) to 255 (max speed)
+
+// ======================= Obstacle Detection Threshold =======================
+const int OBSTACLE_DISTANCE_THRESHOLD_CM = 25; // Distance in CM to consider an obstacle close
+
+// ======================= Setup Function =======================
+void setup() {
+  Serial.begin(9600); // Initialize serial communication for debugging
+  Serial.println("Object Avoiding Car - Starting Up...");
+
+  // Set ultrasonic sensor pins
+  pinMode(ULTRASONIC_TRIG_PIN, OUTPUT);
+  pinMode(ULTRASONIC_ECHO_PIN, INPUT);
+
+  // Set motor control pins as OUTPUTs
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  // Initially stop all motors
+  stopMotors();
+  Serial.println("Robot Initialized. Moving forward...");
+}
+
+// ======================= Sensor Reading Function =======================
+long readUltrasonicDistance() {
+  // Clears the ULTRASONIC_TRIG_PIN condition
+  digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  // Sets the ULTRASONIC_TRIG_PIN on HIGH state for 10 micro seconds
+  digitalWrite(ULTRASONIC_TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
+  // Reads the ULTRASONIC_ECHO_PIN, returns the sound wave travel time in microseconds
+  long duration = pulseIn(ULTRASONIC_ECHO_PIN, HIGH);
+  // Calculating the distance
+  // Speed of sound in air is approximately 343 meters/second, or 0.0343 cm/microsecond.
+  // The sound travels to the object and back, so divide by 2.
+  return duration * 0.0343 / 2;
+}
+
+// ======================= Motor Control Functions =======================
+void stopMotors() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENA, 0); // Set speed to 0
+  analogWrite(ENB, 0); // Set speed to 0
+  Serial.println("Motors STOPPED.");
+}
+
+void moveForward() {
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+  digitalWrite(IN1, HIGH); // Motor A (Right) forward
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); // Motor B (Left) forward
+  digitalWrite(IN4, LOW);
+  Serial.println("Moving FORWARD.");
+}
+
+void moveBackward() {
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+  digitalWrite(IN1, LOW); // Motor A (Right) backward
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW); // Motor B (Left) backward
+  digitalWrite(IN4, HIGH);
+  Serial.println("Moving BACKWARD.");
+}
+
+void turnLeft() {
+  // Option 1: Right motor forward, Left motor backward (pivot turn)
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+  digitalWrite(IN1, HIGH); // Right motor forward
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); // Left motor backward
+  digitalWrite(IN4, HIGH);
+  Serial.println("Turning LEFT.");
+}
+
+void turnRight() {
+  // Option 1: Right motor backward, Left motor forward (pivot turn)
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+  digitalWrite(IN1, LOW); // Right motor backward
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); // Left motor forward
+  digitalWrite(IN4, LOW);
+  Serial.println("Turning RIGHT.");
+}
+
+// ======================= Main Loop Function =======================
+void loop() {
+  long distance = readUltrasonicDistance(); // Get distance in CM
+  Serial.print("Distance: ");
+  Serial.print(distance);
+  Serial.println(" cm");
+
+  // Obstacle avoidance logic
+  if (distance < OBSTACLE_DISTANCE_THRESHOLD_CM && distance != 0) { // If obstacle is close (and not an erroneous 0 reading)
+    Serial.println("Obstacle detected! Avoiding...");
+    stopMotors();          // Stop the robot
+    delay(500);            // Wait briefly
+    moveBackward();        // Move backward
+    delay(1000);           // For 1 second
+    stopMotors();
+    delay(500);
+
+    // Decide which way to turn (simple fixed turn for now)
+    // In a more advanced version, you would scan left/right to find the clearest path.
+    turnRight(); // Or turnLeft()
+    delay(1000); // Turn for 1 second
+    stopMotors();
+    delay(500);
+  } else {
+    // No obstacle, keep moving forward
+    moveForward();
+  }
+
+  delay(50); // Small delay to stabilize readings and actions
+}
