@@ -1,0 +1,169 @@
+# ============================================================================================
+# AI-Powered Face Detection System Using Raspberry Pi + OpenCV
+# ============================================================================================
+# This Python script implements a real-time face detection system on a Raspberry Pi
+# using OpenCV and Haar Cascades. It captures video from the Raspberry Pi Camera Module
+# (or a USB webcam), detects human faces, and draws bounding boxes around them.
+#
+# Author: Gemini
+# Date: June 14, 2025
+#
+# Libraries Required:
+#   - OpenCV (cv2)
+#   - numpy (for numerical operations, though often installed with OpenCV)
+#   - picamera (if using Raspberry Pi Camera Module, for better control)
+#   - imutils (optional, for convenience functions like resizing)
+#
+# Hardware Requirements:
+#   - Raspberry Pi (3B+, 4 recommended)
+#   - Raspberry Pi Camera Module (v1/v2/v3) or compatible USB Webcam
+#   - Power Supply for Raspberry Pi
+#   - Monitor/display for visual output (optional, can run headless with VNC/SSH)
+#
+# Important Notes:
+# - Ensure your Raspberry Pi OS is up to date.
+# - OpenCV installation can be time-consuming on Raspberry Pi.
+# - The Haar Cascade XML file (haarcascade_frontalface_default.xml) must be available
+#   in the same directory as the script, or provide its full path. It's usually found
+#   in your OpenCV installation (e.g., /usr/local/share/opencv4/haarcascades/).
+# - For better performance and more robust detection, consider using pre-trained DNN
+#   models (e.g., MobileNet SSD) with TensorFlow Lite, potentially with a Google Coral
+#   USB Accelerator. This script focuses on Haar Cascades for simplicity.
+# ============================================================================================
+
+import cv2
+import sys
+import os
+import time
+# You might need to install imutils: pip install imutils
+# from imutils.video import VideoStream # Optional, for more stable video stream
+# from imutils.video import FPS        # Optional, for FPS counter
+
+# ======================= Configuration =======================
+# Path to the Haar Cascade XML file for face detection
+# Make sure this path is correct on your Raspberry Pi!
+# Common paths:
+# /usr/local/share/opencv4/haarcascades/haarcascade_frontalface_default.xml
+# /usr/share/opencv/haarcascades/haarcascade_frontalface_default.xml
+# If running from the same directory as the XML, just use the filename.
+CASC_PATH = 'haarcascade_frontalface_default.xml'
+
+# Check if the cascade file exists
+if not os.path.exists(CASC_PATH):
+    print(f"Error: Haar Cascade file not found at {CASC_PATH}")
+    print("Please ensure 'haarcascade_frontalface_default.xml' is in the same directory")
+    print("as this script, or provide the full, correct path.")
+    sys.exit(1)
+
+# Minimum size of the face to detect (width, height) - smaller values detect farther faces but increase false positives
+MIN_FACE_SIZE = (30, 30)
+SCALE_FACTOR = 1.1 # How much the image size is reduced at each image scale
+MIN_NEIGHBORS = 5  # How many neighbors each candidate rectangle should have to retain it
+
+# ======================= Initialize Classifier =======================
+face_cascade = cv2.CascadeClassifier(CASC_PATH)
+
+if face_cascade.empty():
+    print(f"Error: Could not load Haar Cascade classifier from {CASC_PATH}")
+    sys.exit(1)
+
+# ======================= Initialize Camera =======================
+# For Raspberry Pi Camera Module (using picamera backend for better performance)
+# You might need to install 'picamera' if it's not already installed.
+# If using a USB webcam, use cv2.VideoCapture(0) directly.
+try:
+    from picamera.array import PiRGBArray
+    from picamera import PiCamera
+    camera = PiCamera()
+    camera.resolution = (640, 480)  # Set camera resolution
+    camera.framerate = 30           # Set camera framerate
+    rawCapture = PiRGBArray(camera, size=camera.resolution)
+    print("Initialized Raspberry Pi Camera.")
+    camera_type = "picamera"
+except ImportError:
+    print("picamera module not found or Pi Camera not enabled. Falling back to USB webcam.")
+    camera = cv2.VideoCapture(0) # Use 0 for default USB webcam
+    if not camera.isOpened():
+        print("Error: Could not open USB webcam.")
+        sys.exit(1)
+    print("Initialized USB Webcam.")
+    camera_type = "usb"
+
+# Allow the camera to warm up
+time.sleep(0.5)
+
+# Optional: Initialize FPS counter
+# fps = FPS().start()
+
+print("AI-Powered Face Detection System - Running...")
+print("Press 'q' to quit.")
+
+# ======================= Main Loop for Face Detection =======================
+# If using PiCamera:
+if camera_type == "picamera":
+    for frame in camera.capture_continuous(rawCapture, format="bgr", use_video_port=True):
+        image = frame.array # Grab the raw NumPy array representing the image
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) # Convert to grayscale
+
+        # Perform face detection
+        faces = face_cascade.detectMultiScale(
+            gray,
+            scaleFactor=SCALE_FACTOR,
+            minNeighbors=MIN_NEIGHBORS,
+            minSize=MIN_FACE_SIZE,
+            flags=cv2.CASCADE_SCALE_IMAGE
+        )
+
+        # Draw rectangles around the faces
+        for (x, y, w, h) in faces:
+            cv2.rectangle(image, (x, y), (x+w, y+h), (0, 255, 0), 2) # Green rectangle
+
+        # Display the resulting frame
+        cv2.imshow("Face Detection", image)
+
+        # Clear the stream in preparation for the next frame
+        rawCapture.truncate(0)
+
+        # Check for 'q' key press to exit
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            break
+
+# If using USB Webcam:
+elif camera_type == "usb":
+    while True:
+        ret, frame = camera.read() # Read a frame from the camera
+        if not ret:
+            print("Failed to grab frame.")
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) # Convert to grayscale
+
+        # Perform face detection
+        faces = face_cascade.detectMultiScale(
+            gray,
+            scaleFactor=SCALE_FACTOR,
+            minNeighbors=MIN_NEIGHBORS,
+            minSize=MIN_FACE_SIZE,
+            flags=cv2.CASCADE_SCALE_IMAGE
+        )
+
+        # Draw rectangles around the faces
+        for (x, y, w, h) in faces:
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2) # Green rectangle
+
+        # Display the resulting frame
+        cv2.imshow("Face Detection", frame)
+
+        # Check for 'q' key press to exit
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            break
+
+# ======================= Cleanup =======================
+print("Cleaning up...")
+if camera_type == "usb":
+    camera.release() # Release the camera resource
+cv2.destroyAllWindows() # Close all OpenCV windows
+print("System terminated.")
+
