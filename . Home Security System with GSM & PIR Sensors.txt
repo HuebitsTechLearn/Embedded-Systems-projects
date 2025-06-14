@@ -1,0 +1,232 @@
+// ============================================================================================
+// Home Security System with GSM & PIR Sensors - Arduino Code
+// ============================================================================================
+// This code creates a basic home security system that detects motion using a PIR sensor
+// and sends an SMS alert via a GSM module (e.g., SIM800L) to a predefined phone number.
+// It includes an optional alarm buzzer and status LEDs.
+//
+// Author: Gemini
+// Date: June 14, 2025
+//
+// Libraries Required:
+//   1. SoftwareSerial.h (built-in for Arduino IDE) - For GSM module communication.
+//
+// Wiring Guide (Arduino Uno):
+// ----------------------------
+// PIR Motion Sensor (HC-SR501):
+//   - VCC to 5V
+//   - GND to GND
+//   - OUT (Data) to Arduino Digital Pin 2
+//
+// GSM Module (SIM800L/SIM900A):
+//   - VCC to 5V (or 4.2V if using a dedicated LiPo for GSM, but many modules accept 5V logic)
+//   - GND to GND (important: common ground with Arduino)
+//   - RXD to Arduino Digital Pin 4 (SoftwareSerial TX)
+//   - TXD to Arduino Digital Pin 5 (SoftwareSerial RX)
+//   - RST to Arduino Digital Pin 6 (for optional software reset, or connect to 5V via 10K resistor for auto-reset)
+//   - SIM Card: Insert a valid SIM card with credit/plan.
+//   - Power Supply: Connect a separate, robust 5V power supply (e.g., 2A or more) to the GSM module's VCC/GND.
+//     Do NOT power the GSM module directly from the Arduino's 5V pin, as it draws too much current.
+//
+// Buzzer (Optional):
+//   - Positive (+) to Arduino Digital Pin 7 (via a 220 Ohm current-limiting resistor)
+//   - Negative (-) to GND
+//
+// Status LEDs (Optional):
+//   - Armed LED (Green): Anode (+) to Arduino Digital Pin 8 (via 220 Ohm resistor), Cathode (-) to GND
+//   - Alert LED (Red): Anode (+) to Arduino Digital Pin 9 (via 220 Ohm resistor), Cathode (-) to GND
+//
+// Arm/Disarm Button (Optional):
+//   - Push button to Arduino Digital Pin 3
+//   - Other side of button to GND
+//   - Use internal pull-up resistor for the pin in code (pinMode(PIN, INPUT_PULLUP))
+//
+// Important:
+// - Replace YOUR_PHONE_NUMBER with the number you want to receive alerts.
+// - Ensure a strong, stable power supply for the GSM module.
+// - Disconnect GSM TX/RX pins from Arduino (4 & 5) during code upload.
+// ============================================================================================
+
+#include <SoftwareSerial.h> // For communication with GSM module
+
+// ======================= Pin Definitions =======================
+#define PIR_SENSOR_PIN 2      // Digital pin connected to PIR sensor's OUT pin
+#define GSM_RX_PIN 4          // Connect to GSM TXD pin
+#define GSM_TX_PIN 5          // Connect to GSM RXD pin
+#define GSM_RST_PIN 6         // Optional: Connect to GSM RST pin for software reset
+#define ALARM_BUZZER_PIN 7    // Digital pin for the alarm buzzer (optional)
+#define ARMED_LED_PIN 8       // Digital pin for LED indicating system is armed (Green, optional)
+#define ALERT_LED_PIN 9       // Digital pin for LED indicating an alert/motion (Red, optional)
+#define ARM_DISARM_BUTTON_PIN 3 // Digital pin for arm/disarm button (optional)
+
+// ======================= GSM Module Configuration =======================
+// Baud rate for GSM module communication (common for SIM800L)
+const long GSM_BAUD_RATE = 9600; // Common rates: 9600, 19200, 38400
+SoftwareSerial gsmSerial(GSM_RX_PIN, GSM_TX_PIN);
+
+// Phone number to send SMS alerts to (e.g., "+1234567890")
+const char* alertPhoneNumber = "YOUR_PHONE_NUMBER"; // !!! IMPORTANT: Replace with your number !!!
+
+// ======================= System State Variables =======================
+bool systemArmed = false;
+unsigned long lastMotionTime = 0;
+const long REARM_DELAY_MS = 10000; // Delay in milliseconds before re-arming after an alert (10 seconds)
+const long PIR_COOLDOWN_MS = 2000; // PIR sensor needs a small cooldown after motion (2 seconds)
+const int ALERT_LED_BLINK_INTERVAL = 200; // Milliseconds for alert LED blinking
+
+// ======================= Setup Function =======================
+void setup() {
+  Serial.begin(9600); // Initialize serial monitor for debugging
+  Serial.println("Home Security System - Initializing...");
+
+  // Initialize PIR sensor pin
+  pinMode(PIR_SENSOR_PIN, INPUT);
+
+  // Initialize GSM module software serial
+  gsmSerial.begin(GSM_BAUD_RATE);
+  Serial.println("GSM Serial Initialized.");
+
+  // Initialize output pins
+  pinMode(ALARM_BUZZER_PIN, OUTPUT);
+  pinMode(ARMED_LED_PIN, OUTPUT);
+  pinMode(ALERT_LED_PIN, OUTPUT);
+  digitalWrite(ALARM_BUZZER_PIN, LOW); // Ensure buzzer is off
+  digitalWrite(ARMED_LED_PIN, LOW);    // Ensure LEDs are off
+  digitalWrite(ALERT_LED_PIN, LOW);
+
+  // Initialize arm/disarm button
+  pinMode(ARM_DISARM_BUTTON_PIN, INPUT_PULLUP); // Use internal pull-up resistor
+
+  // Initial GSM module setup (wait for module to power up and register)
+  gsmPowerOnReset();
+  Serial.println("GSM Module Ready.");
+
+  // Arm the system initially (or wait for button press)
+  systemArmed = true;
+  digitalWrite(ARMED_LED_PIN, HIGH); // Turn on Armed LED
+  Serial.println("System Armed. Monitoring for motion...");
+  delay(3000); // Give user time to exit after arming
+}
+
+// ======================= GSM Helper Functions =======================
+void gsmPowerOnReset() {
+  Serial.println("Initializing GSM module...");
+  digitalWrite(GSM_RST_PIN, LOW); // Pull low for reset
+  delay(100);
+  digitalWrite(GSM_RST_PIN, HIGH); // Release
+  delay(1000); // Give time for module to start
+  Serial.println("Waiting for GSM module to respond...");
+
+  // Send AT commands to ensure module is ready and configured for SMS
+  while (!gsmSerial.available()) {
+    gsmSerial.println("AT"); // Check if module is responding
+    delay(1000);
+    Serial.print(".");
+  }
+  while(gsmSerial.available()){ // Clear any initial junk
+    gsmSerial.read();
+  }
+  Serial.println("\nGSM module responded.");
+
+  // Configure SMS text mode
+  gsmSerial.println("AT+CMGF=1"); // Set SMS to text mode
+  delay(500);
+  printGsmResponse();
+
+  // Configure new SMS message indication (optional)
+  gsmSerial.println("AT+CNMI=2,2,0,0,0"); // New SMS message indication
+  delay(500);
+  printGsmResponse();
+
+  Serial.println("GSM module configured for SMS.");
+}
+
+void printGsmResponse() {
+  while (gsmSerial.available()) {
+    Serial.write(gsmSerial.read());
+  }
+}
+
+void sendSms(const char* number, const char* message) {
+  Serial.print("Sending SMS to ");
+  Serial.print(number);
+  Serial.print(": ");
+  Serial.println(message);
+
+  gsmSerial.print("AT+CMGS=\"");
+  gsmSerial.print(number);
+  gsmSerial.println("\"");
+  delay(100);
+  gsmSerial.print(message);
+  delay(100);
+  gsmSerial.write(26); // ASCII code for CTRL+Z, signifies end of message
+  delay(3000); // Give time for SMS to send
+  printGsmResponse();
+  Serial.println("SMS send command issued.");
+}
+
+// ======================= Main Loop Function =======================
+void loop() {
+  // Check arm/disarm button
+  if (digitalRead(ARM_DISARM_BUTTON_PIN) == LOW) { // Button is pressed (active LOW)
+    delay(50); // Debounce
+    if (digitalRead(ARM_DISARM_BUTTON_PIN) == LOW) {
+      systemArmed = !systemArmed; // Toggle system armed state
+      if (systemArmed) {
+        Serial.println("System ARMED.");
+        digitalWrite(ARMED_LED_PIN, HIGH);
+        digitalWrite(ALERT_LED_PIN, LOW); // Ensure alert LED is off
+        digitalWrite(ALARM_BUZZER_PIN, LOW); // Ensure buzzer is off
+        delay(3000); // Give time to exit after arming
+      } else {
+        Serial.println("System DISARMED.");
+        digitalWrite(ARMED_LED_PIN, LOW);
+        digitalWrite(ALERT_LED_PIN, LOW);
+        digitalWrite(ALARM_BUZZER_PIN, LOW);
+      }
+      while (digitalRead(ARM_DISARM_BUTTON_PIN) == LOW); // Wait for button release
+    }
+  }
+
+  if (systemArmed) {
+    digitalWrite(ARMED_LED_PIN, HIGH); // Keep armed LED on
+
+    // Read PIR sensor
+    int pirState = digitalRead(PIR_SENSOR_PIN);
+
+    if (pirState == HIGH) { // Motion detected
+      if (millis() - lastMotionTime > PIR_COOLDOWN_MS) { // Debounce PIR sensor
+        Serial.println("MOTION DETECTED!");
+        digitalWrite(ALERT_LED_PIN, HIGH); // Turn on alert LED
+        digitalWrite(ALARM_BUZZER_PIN, HIGH); // Activate buzzer
+
+        sendSms(alertPhoneNumber, "ALERT: Motion detected at your home!");
+        lastMotionTime = millis(); // Update last motion time
+
+        // Wait until system is disarmed or re-arm after delay
+        while (digitalRead(ARM_DISARM_BUTTON_PIN) == HIGH && (millis() - lastMotionTime < REARM_DELAY_MS)) {
+          // Blink alert LED while alarm is active
+          digitalWrite(ALERT_LED_PIN, !digitalRead(ALERT_LED_PIN)); // Toggle LED
+          delay(ALERT_LED_BLINK_INTERVAL);
+          if (digitalRead(ARM_DISARM_BUTTON_PIN) == LOW) break; // Allow disarm during re-arm delay
+        }
+
+        // After re-arm delay or disarm, turn off alarm indicators
+        digitalWrite(ALERT_LED_PIN, LOW);
+        digitalWrite(ALARM_BUZZER_PIN, LOW);
+        if (systemArmed) {
+          Serial.println("System re-armed after alert.");
+        } else {
+          Serial.println("System disarmed after alert.");
+        }
+      }
+    }
+  } else {
+    // System is disarmed, ensure LEDs and buzzer are off
+    digitalWrite(ARMED_LED_PIN, LOW);
+    digitalWrite(ALERT_LED_PIN, LOW);
+    digitalWrite(ALARM_BUZZER_PIN, LOW);
+  }
+
+  delay(100); // Small delay for loop iteration
+}
