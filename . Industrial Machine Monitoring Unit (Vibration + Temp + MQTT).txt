@@ -1,0 +1,301 @@
+// ============================================================================================
+// Industrial Machine Monitoring Unit (Vibration + Temp + MQTT)
+// ============================================================================================
+// This code creates an Industrial Internet of Things (IIoT) monitoring unit using an ESP32.
+// It measures vibration data (RMS, Peak-to-Peak) from an ADXL345 accelerometer and temperature
+// from a DS18B20 sensor. The collected data is then securely transmitted to AWS IoT Core
+// via the MQTT protocol.
+//
+// Author: Gemini
+// Date: June 14, 2025
+//
+// Libraries Required:
+//   1. WiFi.h (built-in for ESP32)
+//   2. PubSubClient.h (by Nick O'Leary) - For MQTT communication
+//   3. ArduinoJson.h (by Benoit Blanchon) - For JSON parsing and creation
+//   4. Adafruit Unified Sensor (by Adafruit) - For ADXL345
+//   5. Adafruit ADXL345 (by Adafruit)        - For ADXL345
+//   6. OneWire Library (by Paul Stoffregen)
+//   7. DallasTemperature Library (by Miles Burton / Dallas Semiconductor)
+//   8. WiFiClientSecure.h (built-in for ESP32 for TLS/SSL)
+//
+// Wiring Guide (ESP32 DevKitC):
+// ----------------------------
+// ADXL345 Accelerometer (I2C):
+//   - VCC to 3.3V (most ADXL345 breakout boards are 3.3V)
+//   - GND to GND
+//   - SDA to ESP32 Digital Pin 21 (SDA)
+//   - SCL to ESP32 Digital Pin 22 (SCL)
+//
+// DS18B20 Temperature Sensor:
+//   - VCC to 3.3V or 5V (depending on sensor module)
+//   - GND to GND
+//   - DQ (Data) to ESP32 Digital Pin 4 (with a 4.7K Ohm pull-up resistor from DQ to VCC)
+//
+// Important:
+// - Replace YOUR_SSID, YOUR_PASSWORD, AWS_IOT_ENDPOINT, and topic with your actual credentials.
+// - AWS IoT requires secure (TLS/SSL) connections. You will need to provision certificates
+//   (Device Certificate, Private Key, and Amazon Root CA) from AWS IoT Core and embed them
+//   in the code. Instructions are provided below.
+// - For robust vibration analysis, you would typically collect raw acceleration data at a
+//   higher sampling rate and perform FFT (Fast Fourier Transform) analysis on the ESP32
+//   or in the cloud. This example performs basic RMS and Peak-to-Peak calculation.
+// ============================================================================================
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h> // For TLS/SSL communication with AWS IoT
+#include <PubSubClient.h>     // For MQTT communication
+#include <ArduinoJson.h>      // For creating JSON payloads
+
+#include <Wire.h>             // For I2C communication with ADXL345
+#include <Adafruit_Sensor.h>    // Required for Adafruit ADXL345 library
+#include <Adafruit_ADXL345.h>   // ADXL345 Accelerometer library
+
+#include <OneWire.h>          // Required for DS18B20 temperature sensor
+#include <DallasTemperature.h> // Required for DS18B20 temperature sensor
+
+// ======================= Wi-Fi Configuration =======================
+const char* WIFI_SSID = "YOUR_SSID";          // Your Wi-Fi SSID
+const char* WIFI_PASSWORD = "YOUR_PASSWORD";  // Your Wi-Fi Password
+
+// ======================= AWS IoT Configuration =======================
+// Replace with your AWS IoT Core endpoint (e.g., a1b2c3d4e5f6g7.iot.us-east-1.amazonaws.com)
+const char* AWS_IOT_ENDPOINT = "YOUR_AWS_IOT_ENDPOINT";
+const int AWS_IOT_PORT = 8883;
+
+// Topic for publishing sensor data (e.g., "machine/sensor_data")
+const char* MQTT_TOPIC_PUB = "machine/sensor_data";
+
+// Client ID for your MQTT connection (must be unique for each device)
+const char* MQTT_CLIENT_ID = "esp32-machine-monitor-001";
+
+// AWS IoT Certificates (Replace with your actual certificates and private key)
+// These should be copied from your AWS IoT Core device creation process.
+// Ensure they are correctly formatted as C-style strings.
+const char* AWS_CERT_CA = R"EOF(
+-----BEGIN CERTIFICATE-----
+Paste your Amazon Root CA certificate here
+-----END CERTIFICATE-----
+)EOF";
+
+const char* AWS_CERT_CRT = R"EOF(
+-----BEGIN CERTIFICATE-----
+Paste your Device Certificate here
+-----END CERTIFICATE-----
+)EOF";
+
+const char* AWS_PRIVATE_KEY = R"EOF(
+-----BEGIN RSA PRIVATE KEY-----
+Paste your Device Private Key here
+-----END RSA PRIVATE KEY-----
+)EOF";
+
+WiFiClientSecure net;
+PubSubClient client(net);
+
+// ======================= Sensor Definitions =======================
+// DS18B20 Temperature Sensor
+#define ONE_WIRE_BUS 4      // DS18B20 data pin connected to ESP32 GPIO 4
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature tempSensors(&oneWire);
+
+// ADXL345 Accelerometer (I2C)
+Adafruit_ADXL345 accel = Adafruit_ADXL345();
+
+// Variables for vibration analysis
+const int SAMPLE_COUNT = 100; // Number of samples for RMS/Peak-to-Peak calculation
+float x_accel_samples[SAMPLE_COUNT];
+float y_accel_samples[SAMPLE_COUNT];
+float z_accel_samples[SAMPLE_COUNT];
+int sampleIndex = 0;
+
+unsigned long lastSensorReadTime = 0;
+const long SENSOR_READ_INTERVAL_MS = 5000; // Read sensors and publish every 5 seconds
+
+// ======================= Function Prototypes =======================
+void connectWiFi();
+void connectAWSIoT();
+void publishSensorData();
+void callback(char* topic, byte* payload, unsigned int length);
+void calculateVibrationMetrics(float &rms_x, float &rms_y, float &rms_z,
+                               float &p2p_x, float &p2p_y, float &p2p_z);
+
+// ======================= Setup Function =======================
+void setup() {
+  Serial.begin(115200); // Start serial communication for debugging
+  Serial.println("Industrial Machine Monitoring Unit - Starting Up...");
+
+  // Initialize ADXL345
+  Wire.begin(); // Initialize I2C
+  if (!accel.begin()) {
+    Serial.println("ADXL345 not found. Check wiring.");
+    while (1); // Halt if sensor fails
+  }
+  Serial.println("ADXL345 found.");
+  accel.setRange(ADXL345_RANGE_16_G); // Set range (e.g., 2G, 4G, 8G, 16G) for vibration
+
+  // Initialize DS18B20
+  tempSensors.begin();
+  Serial.println("DS18B20 found.");
+
+  // Connect to Wi-Fi
+  connectWiFi();
+
+  // Configure MQTT client with AWS IoT certificates
+  net.setCACert(AWS_CERT_CA);
+  net.setCertificate(AWS_CERT_CRT);
+  net.setPrivateKey(AWS_PRIVATE_KEY);
+
+  client.setServer(AWS_IOT_ENDPOINT, AWS_IOT_PORT);
+  client.setCallback(callback); // For any incoming MQTT messages (if subscribed)
+
+  Serial.println("Setup complete.");
+}
+
+// ======================= Main Loop Function =======================
+void loop() {
+  // Ensure MQTT connection is maintained
+  if (!client.connected()) {
+    connectAWSIoT();
+  }
+  client.loop(); // Required to process MQTT messages and maintain connection
+
+  // Read sensors and publish data periodically
+  if (millis() - lastSensorReadTime >= SENSOR_READ_INTERVAL_MS) {
+    publishSensorData();
+    lastSensorReadTime = millis();
+  }
+
+  // Continuously read accelerometer samples for vibration calculation
+  sensors_event_t event;
+  accel.getEvent(&event);
+  x_accel_samples[sampleIndex] = event.acceleration.x;
+  y_accel_samples[sampleIndex] = event.acceleration.y;
+  z_accel_samples[sampleIndex] = event.acceleration.z;
+  sampleIndex = (sampleIndex + 1) % SAMPLE_COUNT; // Loop back to 0 when SAMPLE_COUNT is reached
+
+  delay(10); // Small delay to prevent watchdog timer issues
+}
+
+// ======================= Network & MQTT Functions =======================
+
+void connectWiFi() {
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  unsigned long startTime = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+    if (millis() - startTime > 30000) { // Timeout after 30 seconds
+      Serial.println("\nFailed to connect to WiFi. Restarting ESP32...");
+      ESP.restart();
+    }
+  }
+  Serial.println("\nWiFi connected.");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void connectAWSIoT() {
+  Serial.print("Connecting to AWS IoT...");
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print(".");
+    // Attempt to connect
+    if (client.connect(MQTT_CLIENT_ID)) {
+      Serial.println("\nConnected to AWS IoT!");
+      // client.subscribe("your/subscribe/topic"); // Optional: if you need to receive commands from AWS IoT
+    } else {
+      Serial.print("Failed, rc=");
+      Serial.print(client.state()); // Print MQTT connection state code
+      Serial.println(" trying again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
+
+// Callback function for incoming MQTT messages (if subscribed to a topic)
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+}
+
+void calculateVibrationMetrics(float &rms_x, float &rms_y, float &rms_z,
+                               float &p2p_x, float &p2p_y, float &p2p_z) {
+  float sum_sq_x = 0, sum_sq_y = 0, sum_sq_z = 0;
+  float min_x = 1000, max_x = -1000;
+  float min_y = 1000, max_y = -1000;
+  float min_z = 1000, max_z = -1000;
+
+  for (int i = 0; i < SAMPLE_COUNT; i++) {
+    sum_sq_x += sq(x_accel_samples[i]);
+    sum_sq_y += sq(y_accel_samples[i]);
+    sum_sq_z += sq(z_accel_samples[i]);
+
+    if (x_accel_samples[i] < min_x) min_x = x_accel_samples[i];
+    if (x_accel_samples[i] > max_x) max_x = x_accel_samples[i];
+    if (y_accel_samples[i] < min_y) min_y = y_accel_samples[i];
+    if (y_accel_samples[i] > max_y) max_y = y_accel_samples[i];
+    if (z_accel_samples[i] < min_z) min_z = z_accel_samples[i];
+    if (z_accel_samples[i] > max_z) max_z = z_accel_samples[i];
+  }
+
+  rms_x = sqrt(sum_sq_x / SAMPLE_COUNT);
+  rms_y = sqrt(sum_sq_y / SAMPLE_COUNT);
+  rms_z = sqrt(sum_sq_z / SAMPLE_COUNT);
+
+  p2p_x = max_x - min_x;
+  p2p_y = max_y - min_y;
+  p2p_z = max_z - min_z;
+}
+
+void publishSensorData() {
+  // Read Temperature
+  tempSensors.requestTemperatures();
+  float temperature_c = tempSensors.getTempCByIndex(0);
+
+  if (temperature_c == -127.00) { // Check for DS18B20 error code
+    Serial.println("Error reading temperature sensor!");
+    temperature_c = 0.0; // Default to 0 or specific error value
+  }
+
+  // Calculate Vibration Metrics
+  float rms_x, rms_y, rms_z;
+  float p2p_x, p2p_y, p2p_z;
+  calculateVibrationMetrics(rms_x, rms_y, rms_z, p2p_x, p2p_y, p2p_z);
+
+  // Create JSON payload
+  StaticJsonDocument<256> doc; // Adjust size based on your JSON needs
+
+  doc["timestamp"] = millis(); // Using local timestamp for simplicity; ideally use NTP or server timestamp
+  doc["device_id"] = MQTT_CLIENT_ID;
+  doc["temperature_c"] = temperature_c;
+  doc["vibration_rms_x"] = rms_x;
+  doc["vibration_rms_y"] = rms_y;
+  doc["vibration_rms_z"] = rms_z;
+  doc["vibration_p2p_x"] = p2p_x;
+  doc["vibration_p2p_y"] = p2p_y;
+  doc["vibration_p2p_z"] = p2p_z;
+
+  char jsonBuffer[256];
+  serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
+
+  Serial.print("Publishing to ");
+  Serial.print(MQTT_TOPIC_PUB);
+  Serial.print(": ");
+  Serial.println(jsonBuffer);
+
+  // Publish to AWS IoT
+  if (client.publish(MQTT_TOPIC_PUB, jsonBuffer)) {
+    Serial.println("Publish successful.");
+  } else {
+    Serial.print("Publish failed, rc=");
+    Serial.println(client.state());
+  }
+}
