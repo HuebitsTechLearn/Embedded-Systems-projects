@@ -1,0 +1,282 @@
+============================================================================================
+// Gesture-Controlled Smart Home System - Arduino Code
+// ============================================================================================
+// This project consists of two main parts:
+// 1. Transmitter Unit (Gesture Module): Reads ADXL345, detects gestures, and sends commands via NRF24L01.
+// 2. Receiver Unit (Home Control Module): Receives commands via NRF24L01 and controls relays.
+//
+// Author: Gemini
+// Date: June 14, 2025
+//
+// Libraries Required (for both Transmitter and Receiver):
+//   1. RF24 Library (by TMRh20) - For NRF24L01 communication
+//   2. SPI Library (built-in)   - For NRF24L01 communication
+//
+// Additional Libraries for Transmitter Unit:
+//   3. Adafruit Unified Sensor (by Adafruit) - For ADXL345
+//   4. Adafruit ADXL345 (by Adafruit)        - For ADXL345
+//
+// Important Notes:
+// - Ensure proper power supply for NRF24L01 (3.3V, and a capacitor across VCC/GND is recommended).
+// - For ADXL345, ensure correct I2C wiring (SDA to A4, SCL to A5) or SPI wiring. I2C is used here.
+// - Relays connected to the receiver should be rated for AC mains and wired safely.
+// - Adjust gesture thresholds and command mappings as needed.
+// ============================================================================================
+
+// ============================================================================================
+// PART 1: TRANSMITTER UNIT (GESTURE MODULE) CODE
+// ============================================================================================
+
+// Include necessary libraries for Transmitter
+#include <SPI.h>
+#include <RF24.h>
+#include <Wire.h> // For I2C communication with ADXL345
+#include <Adafruit_Sensor.h> // Required for Adafruit ADXL345 library
+#include <Adafruit_ADXL345.h> // ADXL345 Accelerometer library
+
+// NRF24L01 radio object
+// CE and CSN pins:
+// Uno: CE=9, CSN=10
+// Nano: CE=9, CSN=10 (adjust if different)
+RF24 radio(9, 10);
+
+// Radio pipe addresses for the 2 nodes to communicate.
+// These must be unique and the same on both transmitter and receiver.
+const byte addresses[][6] = {"00001", "00002"};
+
+// ADXL345 sensor object (I2C)
+Adafruit_ADXL345 accel = Adafruit_ADXL345();
+
+// Structure for sending data
+struct Payload {
+  char command[10]; // e.g., "FORWARD", "STOP", "LEFT"
+};
+Payload dataToSend;
+
+// Variables for gesture detection
+float prevX, prevY, prevZ;
+long lastMovementTime = 0;
+const long MOVEMENT_THRESHOLD_MS = 200; // Time in milliseconds to consider a gesture
+const float GESTURE_THRESHOLD_ACCEL = 3.0; // Acceleration threshold for movement detection (in G's)
+const float SWIPE_X_THRESHOLD = 0.5; // X-axis threshold for horizontal swipe (e.g., for Left/Right)
+const float SWIPE_Y_THRESHOLD = 0.5; // Y-axis threshold for vertical swipe (e.g., for Forward/Backward)
+
+void setupTransmitter() {
+  Serial.begin(9600);
+  Serial.println("Transmitter: Initializing...");
+
+  // Initialize NRF24L01 radio
+  if (!radio.begin()) {
+    Serial.println("Transmitter: Radio hardware not responding!");
+    while (1); // Halt if radio fails
+  }
+  radio.setPALevel(RF24_PA_LOW); // Set power amplifier level (RF24_PA_MIN, RF24_PA_LOW, RF24_PA_HIGH, RF24_PA_MAX)
+  radio.openWritingPipe(addresses[0]); // Address for sending
+  radio.stopListening(); // We are a transmitter
+
+  // Initialize ADXL345
+  if (!accel.begin()) {
+    Serial.println("Transmitter: ADXL345 not found. Check wiring.");
+    while (1); // Halt if sensor fails
+  }
+  Serial.println("Transmitter: ADXL345 found.");
+
+  // Set the range of the accelerometer to 4G (more sensitive for gestures)
+  accel.setRange(ADXL345_RANGE_4_G); // Options: 2G, 4G, 8G, 16G
+
+  // Get initial readings
+  sensors_event_t event;
+  accel.getEvent(&event);
+  prevX = event.acceleration.x;
+  prevY = event.acceleration.y;
+  prevZ = event.acceleration.z;
+
+  Serial.println("Transmitter: Ready!");
+}
+
+void loopTransmitter() {
+  sensors_event_t event;
+  accel.getEvent(&event);
+
+  float currentX = event.acceleration.x;
+  float currentY = event.acceleration.y;
+  float currentZ = event.acceleration.z;
+
+  // Calculate change in acceleration
+  float deltaX = currentX - prevX;
+  float deltaY = currentY - prevY;
+  float deltaZ = currentZ - prevZ;
+
+  // Calculate magnitude of movement
+  float movementMagnitude = sqrt(sq(deltaX) + sq(deltaY) + sq(deltaZ));
+
+  // Update previous readings
+  prevX = currentX;
+  prevY = currentY;
+  prevZ = currentZ;
+
+  // Simple gesture detection logic
+  // Acknowledge movement only if magnitude is above threshold
+  if (movementMagnitude > GESTURE_THRESHOLD_ACCEL) {
+    lastMovementTime = millis(); // Record time of significant movement
+
+    // Detect gestures based on primary axis movement
+    if (abs(deltaY) > SWIPE_Y_THRESHOLD && abs(deltaY) > abs(deltaX)) { // Vertical movement dominant
+      if (deltaY > 0) {
+        strcpy(dataToSend.command, "FORWARD");
+      } else {
+        strcpy(dataToSend.command, "BACKWARD");
+      }
+    } else if (abs(deltaX) > SWIPE_X_THRESHOLD && abs(deltaX) > abs(deltaY)) { // Horizontal movement dominant
+      if (deltaX > 0) {
+        strcpy(dataToSend.command, "RIGHT");
+      } else {
+        strcpy(dataToSend.command, "LEFT");
+      }
+    } else {
+      // No specific swipe detected, maybe just a shake
+      strcpy(dataToSend.command, "STOP"); // Default to STOP for generic movement
+    }
+
+    Serial.print("Transmitter: Sending command: ");
+    Serial.println(dataToSend.command);
+    radio.write(&dataToSend, sizeof(Payload)); // Send the data
+    delay(500); // Small delay to prevent rapid re-triggering of gestures
+  } else {
+    // If no significant movement for a while, send STOP
+    if (millis() - lastMovementTime > MOVEMENT_THRESHOLD_MS) {
+      if (strcmp(dataToSend.command, "STOP") != 0) { // Only send STOP if not already STOP
+        strcpy(dataToSend.command, "STOP");
+        Serial.println("Transmitter: No movement, sending STOP");
+        radio.write(&dataToSend, sizeof(Payload));
+      }
+    }
+  }
+
+  // Debugging output for acceleration values
+  // Serial.print("X: "); Serial.print(currentX);
+  // Serial.print(" Y: "); Serial.print(currentY);
+  // Serial.print(" Z: "); Serial.print(currentZ);
+  // Serial.print(" | DeltaX: "); Serial.print(deltaX);
+  // Serial.print(" DeltaY: "); Serial.print(deltaY);
+  // Serial.print(" DeltaZ: "); Serial.print(deltaZ);
+  // Serial.print(" | Magnitude: "); Serial.println(movementMagnitude);
+
+  delay(50); // Small delay to control reading frequency
+}
+
+
+// ============================================================================================
+// PART 2: RECEIVER UNIT (HOME CONTROL MODULE) CODE
+// ============================================================================================
+
+// Include necessary libraries for Receiver
+#include <SPI.h>
+#include <RF24.h>
+
+// NRF24L01 radio object
+// CE and CSN pins:
+// Uno: CE=9, CSN=10
+// Nano: CE=9, CSN=10 (adjust if different)
+RF24 radio(9, 10);
+
+// Radio pipe addresses for the 2 nodes to communicate.
+// These must be unique and the same on both transmitter and receiver.
+const byte addresses[][6] = {"00001", "00002"};
+
+// Define relay control pins
+// Connect the IN pin of the relay module to these digital pins
+#define LIGHT_RELAY_PIN 2   // Example: Relay for Lights
+#define FAN_RELAY_PIN 3     // Example: Relay for Fan
+#define AC_RELAY_PIN 4      // Example: Relay for AC (or another appliance)
+
+// Structure for receiving data (must match transmitter's payload structure)
+struct Payload {
+  char command[10]; // e.g., "FORWARD", "STOP", "LEFT"
+};
+Payload receivedData;
+
+void setupReceiver() {
+  Serial.begin(9600);
+  Serial.println("Receiver: Initializing...");
+
+  // Initialize NRF24L01 radio
+  if (!radio.begin()) {
+    Serial.println("Receiver: Radio hardware not responding!");
+    while (1); // Halt if radio fails
+  }
+  radio.setPALevel(RF24_PA_LOW); // Set power amplifier level
+  radio.openReadingPipe(1, addresses[0]); // Address for listening (must match transmitter's writing pipe)
+  radio.startListening(); // We are a receiver
+
+  // Initialize relay pins as OUTPUT
+  pinMode(LIGHT_RELAY_PIN, OUTPUT);
+  pinMode(FAN_RELAY_PIN, OUTPUT);
+  pinMode(AC_RELAY_PIN, OUTPUT);
+
+  // Ensure all relays are OFF initially (assuming active LOW relays)
+  digitalWrite(LIGHT_RELAY_PIN, HIGH);
+  digitalWrite(FAN_RELAY_PIN, HIGH);
+  digitalWrite(AC_RELAY_PIN, HIGH);
+
+  Serial.println("Receiver: Ready! Waiting for commands...");
+}
+
+void loopReceiver() {
+  if (radio.available()) {
+    radio.read(&receivedData, sizeof(Payload));
+    Serial.print("Receiver: Received command: ");
+    Serial.println(receivedData.command);
+
+    // Process the received command and control relays
+    if (strcmp(receivedData.command, "FORWARD") == 0) {
+      // Example: Toggle light
+      digitalWrite(LIGHT_RELAY_PIN, !digitalRead(LIGHT_RELAY_PIN)); // Toggle current state
+      Serial.println("Receiver: Toggling Lights");
+    } else if (strcmp(receivedData.command, "BACKWARD") == 0) {
+      // Example: Turn fan ON
+      digitalWrite(FAN_RELAY_PIN, LOW); // Assuming LOW activates relay
+      Serial.println("Receiver: Turning Fan ON");
+    } else if (strcmp(receivedData.command, "LEFT") == 0) {
+      // Example: Turn AC ON
+      digitalWrite(AC_RELAY_PIN, LOW); // Assuming LOW activates relay
+      Serial.println("Receiver: Turning AC ON");
+    } else if (strcmp(receivedData.command, "RIGHT") == 0) {
+      // Example: Turn AC OFF
+      digitalWrite(AC_RELAY_PIN, HIGH); // Assuming HIGH deactivates relay
+      Serial.println("Receiver: Turning AC OFF");
+    } else if (strcmp(receivedData.command, "STOP") == 0) {
+      // Example: Turn everything OFF
+      digitalWrite(LIGHT_RELAY_PIN, HIGH);
+      digitalWrite(FAN_RELAY_PIN, HIGH);
+      digitalWrite(AC_RELAY_PIN, HIGH);
+      Serial.println("Receiver: All appliances OFF");
+    }
+  }
+
+  delay(10); // Small delay
+}
+
+
+// ============================================================================================
+// ARDUINO SKETCH ENTRY POINT
+// Choose ONE of the following to compile for your specific Arduino board.
+// Comment out the part you are NOT using.
+// ============================================================================================
+
+// // Uncomment this block for the TRANSMITTER UNIT
+// void setup() {
+//   setupTransmitter();
+// }
+// void loop() {
+//   loopTransmitter();
+// }
+
+
+// Uncomment this block for the RECEIVER UNIT
+void setup() {
+  setupReceiver();
+}
+void loop() {
+  loopReceiver();
+}
